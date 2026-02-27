@@ -7,14 +7,14 @@ from types import TracebackType
 from typing import Self
 
 from .connection import BaseConnection
-from .errors import CommandError
+from .errors import CommandError, ClientConnectionError
 from .utils import encode_params, tokenize_response
 
 
 class CommandConnection(BaseConnection):
-    """Connection to a Vantage Host Command service."""
+    """Connection to a Vantage QLink Host Command service."""
 
-    default_port = 10001
+    default_port = 3040
 
 
 @dataclass
@@ -27,7 +27,7 @@ class CommandResponse:
 
 
 class CommandClient:
-    """Client to send commands to the Vantage Host Command service."""
+    """Client to send commands to the Vantage QLink Host Command service."""
 
     def __init__(
         self,
@@ -84,12 +84,12 @@ class CommandClient:
         request = command
         if params:
             request += f" {encode_params(*params, force_quotes=force_quotes)}"
-        request += f"\r"
+        request += "\r"
 
         # Send the request and parse the response
         *data, return_line = await self.raw_request(request, connection=connection)
         command, *args = tokenize_response(return_line)
-        return CommandResponse(command[2:], args, data)
+        return CommandResponse(command[2:] if len(command) > 2 else command, args, data)
 
     async def raw_request(
         self, request: str, connection: CommandConnection | None = None
@@ -97,7 +97,7 @@ class CommandClient:
         """Send a raw command to the Host Command service and return all response lines.
 
         Handles authentication if required, and raises an exception if the response line
-        contains R:ERROR.
+        contains an error code.
 
         Args:
             request: The request to send.
@@ -110,15 +110,19 @@ class CommandClient:
 
         # Send the command
         async with self._command_lock:
-            self._logger.debug("Sending command: %s", request)
+            self._logger.debug("Sending command: %s", request.strip())
             await conn.write(f"{request}\n")
 
             # Read all lines of the response
             response_lines = []
             while True:
                 response_line = await conn.readuntil(b"\r", self._read_timeout)
-                response_line = response_line.rstrip()
-                self._logger.debug("Recieved response: %s", response_line)
+                response_line = response_line.strip()
+                self._logger.debug("Received response: %s", response_line)
+
+                # Skip empty lines
+                if not response_line:
+                    continue
 
                 # Handle error codes
                 if response_line == "257":
@@ -129,7 +133,7 @@ class CommandClient:
                     self._logger.debug("Ignoring event message: %s", response_line)
                     continue
 
-                # The response is the direct response from the system, since we are not subscribing to data atm
+                # The response is the direct response from the system
                 response_lines.append(response_line)
                 break
 
